@@ -171,11 +171,13 @@
         <div class="row">
           <button onclick="exportarDiarioCSV()">Exportar Diário (CSV)</button>
           <button onclick="exportarRazaoCSV()">Exportar Razão (CSV)</button>
+          <button onclick="exportarBalanceteCSV()">Exportar Balancete (CSV)</button>
         </div>
       </div>
     </div>
     <div id="diarioConteudo"><div class="empty card">Importe um extrato para gerar o Livro Diário e o Razão.</div></div>
     <div id="razaoConteudo"></div>
+    <div id="balanceteConteudo"></div>
   </section>
 
   <!-- ABA CATEGORIAS -->
@@ -214,6 +216,38 @@
         <button onclick="reclassificarTudo()">Reaplicar regras nas transações</button>
       </div>
     </div>
+
+    <div class="card">
+      <h2>Backup na nuvem — Google Sheets</h2>
+      <p class="small muted">Salva as transações e as categorias/regras numa planilha do Google Sheets, para não perder os dados ao fechar a janela e poder abrir de outro computador. Funciona com um pequeno script gratuito que você cola na sua conta Google (passo a passo abaixo). Nada é enviado para fora sem você mandar.</p>
+      <div class="rule-row">
+        <span class="small muted" style="min-width:120px">URL do App da Web:</span>
+        <input type="text" id="sheetsUrl" placeholder="https://script.google.com/macros/s/…/exec" style="flex:1;min-width:280px">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <button class="primary" onclick="salvarNaNuvem()">Salvar na nuvem</button>
+        <button onclick="carregarDaNuvem()">Carregar da nuvem</button>
+        <span id="sheetsStatus" class="small muted"></span>
+      </div>
+      <details style="margin-top:14px">
+        <summary class="small" style="cursor:pointer;color:var(--accent);font-weight:600">Como configurar (uma vez só)</summary>
+        <ol class="small muted" style="line-height:1.7;margin-top:10px">
+          <li>Crie uma planilha nova em <strong>sheets.google.com</strong> (pode ficar vazia).</li>
+          <li>No menu da planilha: <strong>Extensões → Apps Script</strong>.</li>
+          <li>Apague o conteúdo que aparecer, cole o código abaixo (botão <em>Copiar código</em>) e salve (💾).</li>
+          <li>Clique em <strong>Implantar → Nova implantação</strong>. Em "Tipo", escolha <strong>App da Web</strong>.</li>
+          <li>Configure: <em>Executar como</em> = <strong>Eu</strong>; <em>Quem tem acesso</em> = <strong>Qualquer pessoa</strong>. Clique em <strong>Implantar</strong> e autorize o acesso (é a sua própria conta).</li>
+          <li>Copie a <strong>URL do app da Web</strong> (termina em <code>/exec</code>) e cole no campo acima.</li>
+          <li>Pronto: use <em>Salvar na nuvem</em> para gravar e <em>Carregar da nuvem</em> para trazer de volta.</li>
+        </ol>
+        <div class="row" style="margin:8px 0">
+          <button onclick="copiarCodigoApps()">Copiar código</button>
+          <button onclick="baixarCodigoApps()">Baixar código (.gs)</button>
+          <span id="appsCopyStatus" class="small muted"></span>
+        </div>
+        <pre id="codigoApps" class="small" style="background:#0f1720;color:#e6edf3;padding:14px;border-radius:8px;overflow-x:auto;white-space:pre;line-height:1.45"></pre>
+      </details>
+    </div>
   </section>
 </div>
 
@@ -223,6 +257,7 @@
    ============================================================ */
 let transacoes = [];   // {data, ano, mes, chaveMes, descricao, valor, categoria, fitid}
 let saldoOfxFinal = null;
+let sheetsUrl = "";    // URL do App da Web (Google Apps Script) para backup na nuvem
 
 // Categorias padrão pensadas para uma associação sem fins lucrativos
 let categorias = [
@@ -651,9 +686,10 @@ function popularAnosLivro(){
 }
 function renderDiarioRazao(){
   const dDiv=document.getElementById("diarioConteudo"), rDiv=document.getElementById("razaoConteudo");
+  const bDiv=document.getElementById("balanceteConteudo");
   if(transacoes.length===0){
     dDiv.innerHTML='<div class="empty card">Importe um extrato para gerar o Livro Diário e o Razão.</div>';
-    rDiv.innerHTML=''; return;
+    rDiv.innerHTML=''; if(bDiv) bDiv.innerHTML=''; return;
   }
   popularAnosLivro();
   const ano=document.getElementById("filtroAnoLivro").value;
@@ -686,6 +722,9 @@ function renderDiarioRazao(){
         </tbody></table></div>`;
   });
   rDiv.innerHTML=`<div class="card"><h2>Livro Razão${ano?` — Exercício ${ano}`:""}</h2>${r}</div>`;
+
+  // ---- Balancete de verificação ----
+  if(bDiv) bDiv.innerHTML=renderBalancete(ano);
 }
 function exportarDiarioCSV(){
   if(!transacoes.length) return alert("Importe um extrato primeiro.");
@@ -710,6 +749,230 @@ function exportarRazaoCSV(){
 }
 
 /* ============================================================
+   BALANCETE DE VERIFICAÇÃO
+   Prova que os livros fecham: soma dos débitos = soma dos créditos.
+   Reaproveita o Razão. Sinal do saldo: positivo = devedor, negativo = credor.
+   ============================================================ */
+function gerarBalancete(ano){
+  const contas=gerarRazao(ano);
+  const linhas=Object.keys(contas).sort().map(cod=>{
+    const c=contas[cod];
+    return {codigo:c.conta.codigo, nome:c.conta.nome,
+      abertura:(cod===CONTA_BANCO.codigo)?c.abertura:0,
+      debito:c.totDeb, credito:c.totCred, saldo:c.saldoFinal};
+  });
+  const soma=arr=>arr.reduce((s,x)=>s+x,0);
+  const totDeb=soma(linhas.map(l=>l.debito));
+  const totCred=soma(linhas.map(l=>l.credito));
+  const totAbertura=soma(linhas.map(l=>l.abertura));
+  const saldoDevedor=soma(linhas.filter(l=>l.saldo>0).map(l=>l.saldo));
+  const saldoCredor=soma(linhas.filter(l=>l.saldo<0).map(l=>Math.abs(l.saldo)));
+  return {linhas,totDeb,totCred,totAbertura,saldoDevedor,saldoCredor,
+    diferenca:totDeb-totCred, fecha:Math.abs(totDeb-totCred)<0.005};
+}
+function renderBalancete(ano){
+  const b=gerarBalancete(ano);
+  if(!b.linhas.length) return "";
+  const linhas=b.linhas.map(l=>`<tr>
+      <td>${l.codigo} · ${l.nome}</td>
+      <td class="r num">${l.abertura?saldoDC(l.abertura):"—"}</td>
+      <td class="r num">${l.debito?fmtBRL(l.debito):"—"}</td>
+      <td class="r num">${l.credito?fmtBRL(l.credito):"—"}</td>
+      <td class="r num">${l.saldo?saldoDC(l.saldo):fmtBRL(0)}</td>
+    </tr>`).join("");
+  const selo=b.fecha
+    ? `<span class="pill rec" style="margin-left:10px">✓ Fecha</span>`
+    : `<span class="pill desp" style="margin-left:10px">✗ Diferença de ${fmtBRL(Math.abs(b.diferenca))}</span>`;
+  const notaAbertura=b.totAbertura
+    ? `<p class="hint">O saldo atual do Banco já inclui o saldo de abertura de ${saldoDC(b.totAbertura)}. Por isso o total de saldos devedores (${fmtBRL(b.saldoDevedor)}) supera o de credores (${fmtBRL(b.saldoCredor)}) exatamente nesse valor — a contrapartida patrimonial da abertura é lançada pelo contador e por isso não aparece aqui.</p>`
+    : `<p class="hint">Total de saldos devedores: ${fmtBRL(b.saldoDevedor)} · credores: ${fmtBRL(b.saldoCredor)}.</p>`;
+  return `<div class="card"><h2>Balancete de Verificação${ano?` — Exercício ${ano}`:""}<span>${selo}</span></h2>
+    <div style="overflow-x:auto"><table>
+      <thead><tr><th>Conta</th><th class="r">Saldo abertura</th><th class="r">Débitos</th><th class="r">Créditos</th><th class="r">Saldo atual</th></tr></thead>
+      <tbody>${linhas}
+        <tr class="total-line"><td>TOTAIS</td><td class="r num">${b.totAbertura?saldoDC(b.totAbertura):"—"}</td><td class="r num">${fmtBRL(b.totDeb)}</td><td class="r num">${fmtBRL(b.totCred)}</td><td class="r num">${saldoDC(b.saldoDevedor-b.saldoCredor)}</td></tr>
+      </tbody></table></div>
+    <p class="hint" style="margin-top:12px">Verificação (partidas dobradas): total de débitos <strong>${fmtBRL(b.totDeb)}</strong> ${b.fecha?"=":"≠"} total de créditos <strong>${fmtBRL(b.totCred)}</strong>. ${b.fecha?"Os livros fecham.":"Há uma diferença — confira os lançamentos."}</p>
+    ${notaAbertura}
+  </div>`;
+}
+function exportarBalanceteCSV(){
+  if(!transacoes.length) return alert("Importe um extrato primeiro.");
+  const ano=document.getElementById("filtroAnoLivro").value;
+  const b=gerarBalancete(ano);
+  const natureza=v=> v>0?"Devedor":v<0?"Credor":"";
+  const linhas=[["Conta","Saldo abertura","Débitos","Créditos","Saldo atual","Natureza"]];
+  b.linhas.forEach(l=>linhas.push([`${l.codigo} · ${l.nome}`,
+    csvNum(Math.abs(l.abertura)), csvNum(l.debito), csvNum(l.credito),
+    csvNum(Math.abs(l.saldo)), natureza(l.saldo)]));
+  linhas.push(["TOTAIS", csvNum(Math.abs(b.totAbertura)), csvNum(b.totDeb), csvNum(b.totCred),
+    csvNum(Math.abs(b.saldoDevedor-b.saldoCredor)), ""]);
+  linhas.push([b.fecha?"CONFERE: débitos = créditos":"NÃO CONFERE",
+    "", csvNum(b.totDeb), csvNum(b.totCred), "", ""]);
+  baixar(gerarCSV(linhas), "balancete-verificacao.csv");
+}
+
+/* ============================================================
+   BACKUP NA NUVEM (Google Sheets via Apps Script Web App)
+   Sem CDN nem SDK: a página só faz fetch para o script que o
+   usuário publica na própria conta Google. Offline, degrada
+   sem quebrar. POST vai como text/plain (requisição "simples",
+   evita o preflight de CORS que o Apps Script não trata).
+   ============================================================ */
+const APPS_SCRIPT_CODE = `// Livro Caixa Trilheiros — backup no Google Sheets
+// Cole em Extensoes > Apps Script da sua planilha e publique como App da Web
+// (Executar como: Eu | Quem tem acesso: Qualquer pessoa).
+const ABA_TX = 'Transacoes';
+const ABA_CFG = 'Config';
+
+function doGet() {
+  return responder(carregar());
+}
+function doPost(e) {
+  try {
+    const dados = JSON.parse(e.postData.contents);
+    if (dados.tipo === 'salvar') {
+      salvar(dados);
+      return responder({ ok: true, salvas: (dados.transacoes || []).length });
+    }
+    return responder(carregar());
+  } catch (err) {
+    return responder({ ok: false, erro: String(err) });
+  }
+}
+function responder(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+function aba(nome) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ss.getSheetByName(nome) || ss.insertSheet(nome);
+}
+function salvar(dados) {
+  const tx = dados.transacoes || [];
+  const sh = aba(ABA_TX);
+  sh.clear();
+  const cab = ['Data', 'DataISO', 'Descricao', 'Valor', 'Categoria', 'FITID'];
+  sh.getRange(1, 1, 1, cab.length).setValues([cab]);
+  sh.getRange(1, 1, 1, 6).setFontWeight('bold');
+  sh.getRange(1, 1, sh.getMaxRows(), 1).setNumberFormat('@'); // Data como texto
+  if (tx.length) {
+    const linhas = tx.map(function (t) {
+      return [t.data, t.dataISO, t.descricao, t.valor, t.categoria, t.fitid];
+    });
+    sh.getRange(2, 1, linhas.length, 6).setValues(linhas);
+  }
+  const cfg = aba(ABA_CFG);
+  cfg.clear();
+  cfg.getRange(1, 1).setValue('config_json');
+  cfg.getRange(1, 2).setValue(JSON.stringify(dados.config || {}));
+}
+function carregar() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(ABA_TX);
+  const transacoes = [];
+  if (sh && sh.getLastRow() > 1) {
+    const valores = sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+    valores.forEach(function (r) {
+      if (!r[1] && !r[5]) return;
+      transacoes.push({
+        data: String(r[0]), dataISO: String(r[1]), descricao: String(r[2]),
+        valor: Number(r[3]) || 0, categoria: String(r[4]), fitid: String(r[5])
+      });
+    });
+  }
+  let config = {};
+  const cfg = ss.getSheetByName(ABA_CFG);
+  if (cfg && cfg.getRange(1, 2).getValue()) {
+    try { config = JSON.parse(cfg.getRange(1, 2).getValue()); } catch (e) {}
+  }
+  return { ok: true, transacoes: transacoes, config: config };
+}`;
+
+// localStorage protegido: só serve para lembrar a URL entre sessões quando
+// publicado (ex.: GitHub Pages). No preview como artefato falha em silêncio.
+function lembrarUrl(u){ try{ localStorage.setItem("sheetsUrl", u); }catch(e){} }
+function relembrarUrl(){ try{ return localStorage.getItem("sheetsUrl")||""; }catch(e){ return ""; } }
+
+// reconstrói ano/mes/chaveMes/data a partir do dataISO ao carregar da nuvem
+function hidratarTransacao(t){
+  const iso=(t.dataISO||"").slice(0,10);
+  const [ano,mes,dia]=iso.split("-");
+  return {
+    data:(dia&&mes&&ano)?`${dia}/${mes}/${ano}`:(t.data||""),
+    dataISO:iso, ano:ano||"", mes:mes||"", chaveMes:(ano&&mes)?`${ano}-${mes}`:"",
+    descricao:t.descricao||"(sem descrição)",
+    valor:Number(t.valor)||0,
+    categoria:t.categoria||NAO_CLASSIFICADO,
+    fitid:String(t.fitid||(iso+"|"+t.valor+"|"+t.descricao))
+  };
+}
+function urlNuvem(){
+  const url=document.getElementById("sheetsUrl").value.trim();
+  if(url){ sheetsUrl=url; lembrarUrl(url); }
+  return url;
+}
+async function salvarNaNuvem(){
+  const url=urlNuvem();
+  if(!url) return alert("Cole primeiro a URL do App da Web (veja \"Como configurar\").");
+  if(!transacoes.length) return alert("Importe um extrato antes de salvar na nuvem.");
+  const status=document.getElementById("sheetsStatus");
+  status.textContent="Salvando…";
+  const payload={
+    tipo:"salvar",
+    transacoes:transacoes.map(t=>({data:t.data,dataISO:t.dataISO,descricao:t.descricao,valor:t.valor,categoria:t.categoria,fitid:t.fitid})),
+    config:{categorias,regras,saldoInicial:saldoInicialGlobal()}
+  };
+  try{
+    const resp=await fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(payload)});
+    const data=await resp.json();
+    if(data&&data.ok) status.textContent=`Salvo na planilha às ${new Date().toLocaleTimeString("pt-BR")} · ${payload.transacoes.length} transações.`;
+    else status.textContent="A planilha respondeu com erro: "+((data&&data.erro)||"desconhecido");
+  }catch(err){
+    status.textContent="Não consegui falar com a planilha. Confira a URL e se o App da Web está publicado para \"qualquer pessoa\". ("+err.message+")";
+  }
+}
+async function carregarDaNuvem(){
+  const url=urlNuvem();
+  if(!url) return alert("Cole primeiro a URL do App da Web (veja \"Como configurar\").");
+  if(transacoes.length && !confirm("Isto substitui os dados desta janela pelos que estão na planilha. Continuar?")) return;
+  const status=document.getElementById("sheetsStatus");
+  status.textContent="Carregando…";
+  try{
+    const resp=await fetch(url,{method:"GET"});
+    const data=await resp.json();
+    if(!data||!data.ok) throw new Error((data&&data.erro)||"resposta inválida");
+    transacoes=(data.transacoes||[]).map(hidratarTransacao).filter(t=>t.dataISO);
+    if(data.config){
+      if(Array.isArray(data.config.categorias)&&data.config.categorias.length) categorias=data.config.categorias;
+      if(Array.isArray(data.config.regras)) regras=data.config.regras;
+      if(data.config.saldoInicial!=null) document.getElementById("saldoInicial").value=data.config.saldoInicial;
+    }
+    transacoes.sort((a,b)=> a.dataISO<b.dataISO?-1:a.dataISO>b.dataISO?1:0);
+    atualizarTudo();
+    status.textContent=`Carregado da planilha · ${transacoes.length} transações.`;
+  }catch(err){
+    status.textContent="Não consegui carregar da planilha. Confira a URL/publicação. ("+err.message+")";
+  }
+}
+function copiarCodigoApps(){
+  const aviso=document.getElementById("appsCopyStatus");
+  const ok=()=>{ aviso.textContent="Código copiado."; setTimeout(()=>aviso.textContent="",2500); };
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(APPS_SCRIPT_CODE).then(ok,()=>selecionarCodigo());
+  } else selecionarCodigo();
+}
+function selecionarCodigo(){
+  const pre=document.getElementById("codigoApps");
+  const sel=window.getSelection(), range=document.createRange();
+  range.selectNodeContents(pre); sel.removeAllRanges(); sel.addRange(range);
+  document.getElementById("appsCopyStatus").textContent="Selecionado — use Ctrl/Cmd+C para copiar.";
+}
+function baixarCodigoApps(){
+  baixar(new Blob([APPS_SCRIPT_CODE],{type:"text/plain;charset=utf-8"}),"livro-caixa-backup.gs");
+}
+
+/* ============================================================
    NAVEGAÇÃO E EVENTOS
    ============================================================ */
 function trocarAba(nome){
@@ -726,6 +989,11 @@ fileInput.addEventListener("change",e=>{ importarArquivos(e.target.files); e.tar
 ["dragover","dragenter"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
 ["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
 drop.addEventListener("drop",e=>{ if(e.dataTransfer.files.length) importarArquivos(e.dataTransfer.files); });
+
+// backup na nuvem: mostra o código do Apps Script e relembra a URL
+document.getElementById("codigoApps").textContent = APPS_SCRIPT_CODE;
+sheetsUrl = relembrarUrl();
+if(sheetsUrl) document.getElementById("sheetsUrl").value = sheetsUrl;
 
 // inicializa telas vazias
 atualizarTudo();
